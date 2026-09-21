@@ -5,6 +5,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 import matplotlib.pyplot as plt
+import altair as alt
+
+from src.analysis import (
+    analysis_months, rolling_spread, seasonal_year_bootstrap,
+    moving_block_mean_bootstrap, decomposition_comparison,
+)
 
 
 # =========================================================
@@ -87,24 +93,22 @@ st.caption(
 c1, c2, c3, c4 = st.columns(4)
 
 c1.metric("Region", "PJM East")
-c2.metric("Measure", "Demand")
+c2.metric("Measure", "Electricity demand")
 c3.metric("Unit", "MW")
 c4.metric("Coverage", "2002–2018")
 
 st.markdown(
     """
-### How to read this visualization
+### About the data
 
-This project analyzes **PJM East electricity demand** over time.
+Historical **PJM East (PJME) electricity demand** is measured in **megawatts (MW)**.
+The original hourly values are aggregated by **mean**, not sum, to compare
+hourly, daily, weekly, monthly, quarterly and yearly *average demand*.
+Monthly statistical analyses exclude the incomplete January 2002 and
+August 2018 boundary months; the year-by-year seasonal chart uses 2003–2017.
 
-- The faint line shows observed electricity demand.
-- The orange line shows the rolling mean.
-- The shaded region shows the observations currently used to calculate that mean.
-- Use **Play / Pause** or drag the timeline slider to inspect how the pattern develops through time.
-
-Changing the rolling-window length changes what the chart emphasizes:
-short windows retain more seasonal variation, while longer windows reveal
-the broader trend but can suppress meaningful turning points.
+Use the sidebar to choose an analysis. Open the **Uncertainty**, **Decomposition**
+and **Altair date brush** views for the full Week 4 extensions.
 """
 )
 
@@ -158,6 +162,9 @@ mode = st.sidebar.selectbox(
         "2 · Seasonal pattern by year",
         "3 · Progressive time-series reveal",
         "4 · Manual Streamlit-loop demo",
+        "5 · Uncertainty & bootstrap confidence intervals",
+        "6 · Additive vs multiplicative decomposition",
+        "7 · Altair interactive date-range brush",
     ],
 )
 
@@ -384,8 +391,7 @@ def build_smooth_rolling_animation(
             line=dict(
                 width=3.2,
                 color="#ff7a59",
-                shape="spline",
-                smoothing=0.55,
+                shape="linear",
             ),
             hovertemplate="%{x}<br>%{y:,.0f} MW<extra></extra>",
         )
@@ -538,8 +544,7 @@ def build_seasonal_year_animation(monthly_s: pd.Series) -> go.Figure:
                 line=dict(
                     width=3,
                     color="#78a6ff",
-                    shape="spline",
-                    smoothing=0.55,
+                    shape="linear",
                 ),
                 marker=dict(size=9, color="#ff8c42"),
                 name=str(first_year),
@@ -663,8 +668,7 @@ def build_progressive_reveal(
             line=dict(
                 width=3,
                 color="#ff8c42",
-                shape="spline",
-                smoothing=0.55,
+                shape="linear",
             ),
         )
     )
@@ -942,6 +946,332 @@ def manual_loop_demo():
 
 
 # =========================================================
+# EXTENSION 5 — UNCERTAINTY VISUALIZATION
+# =========================================================
+
+@st.cache_data(show_spinner=False)
+def cached_year_bootstrap(s: pd.Series, n_boot: int):
+    return seasonal_year_bootstrap(s, n_boot=n_boot, seed=42)
+
+
+@st.cache_data(show_spinner=False)
+def cached_block_bootstrap(s: pd.Series, n_boot: int):
+    return moving_block_mean_bootstrap(
+        s, n_boot=n_boot, block_length=12, seed=42
+    )
+
+
+def uncertainty_panel():
+    st.subheader("5 · Understanding variability and uncertainty")
+    st.markdown(
+        """**Two shaded bands can look similar while answering different questions.**
+        The rolling ±2 SD band shows the *spread of observed demand* within
+        a 12-month window. The bootstrapped seasonal band estimates
+        *uncertainty in the historical mean for each calendar month*.
+        Neither is a forecast or a prediction interval for future demand."""
+    )
+    s = analysis_months(monthly)
+    resamples = st.slider(
+        "Bootstrap resamples", 500, 5000, 2000, 500,
+        help="Resampling entire years preserves their within-year monthly pattern.",
+    )
+    tab_ci, tab_spread, tab_mean = st.tabs([
+        "95% CI band · seasonal averages",
+        "±2 SD · rolling spread",
+        "95% CI · overall historical mean",
+    ])
+
+    with tab_ci:
+        profile = cached_year_bootstrap(s, resamples)
+        labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=labels, y=profile["ci_high"], mode="lines",
+            line=dict(width=0), showlegend=False, hoverinfo="skip",
+        ))
+        fig.add_trace(go.Scatter(
+            x=labels, y=profile["ci_low"], mode="lines",
+            line=dict(width=0), fill="tonexty",
+            fillcolor="rgba(110,168,254,0.25)",
+            name="95% year-bootstrap CI for the seasonal mean",
+            hovertemplate="%{x}: lower bound %{y:,.0f} MW<extra></extra>",
+        ))
+        fig.add_trace(go.Scatter(
+            x=labels, y=profile["mean"], mode="lines+markers",
+            name="Mean demand by calendar month",
+            line=dict(color="#ff8c42", width=3),
+            marker=dict(size=8),
+            hovertemplate="%{x}: mean %{y:,.0f} MW<extra></extra>",
+        ))
+        fig = style_plot(
+            fig, "Seasonal monthly average · year-resampled 95% confidence band",
+            bottom=80,
+        )
+        fig.update_xaxes(title="Calendar month", type="category")
+        fig.update_yaxes(title="Average electricity demand (MW)")
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(
+            f"{profile.attrs['n_years']} complete calendar years "
+            f"({profile.attrs['years'][0]}–{profile.attrs['years'][1]}); "
+            f"{resamples:,} bootstrap resamples of whole years, with replacement."
+        )
+        st.info(
+            "**Interpretation:** The ribbon describes uncertainty in each "
+            "calendar month's *historical average across years*. Entire years "
+            "are resampled as units to retain within-year dependence. The "
+            "interval is not the likely range of an individual month, "
+            "and year-to-year trend/nonstationarity limits its interpretation."
+        )
+
+    with tab_spread:
+        spread = rolling_spread(s, window=12)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=spread.index, y=spread["upper"], mode="lines",
+            line=dict(width=0), showlegend=False, hoverinfo="skip",
+        ))
+        fig.add_trace(go.Scatter(
+            x=spread.index, y=spread["lower"], mode="lines",
+            line=dict(width=0), fill="tonexty",
+            fillcolor="rgba(125,165,250,0.20)",
+            name="12-month rolling mean ±2 SD (spread)",
+        ))
+        fig.add_trace(go.Scatter(
+            x=s.index, y=s.values, mode="lines", name="Monthly demand",
+            line=dict(color="rgba(160,180,245,0.45)", width=1.2),
+        ))
+        fig.add_trace(go.Scatter(
+            x=spread.index, y=spread["mean"], mode="lines",
+            name="12-month rolling mean",
+            line=dict(color="#ff8c42", width=3),
+        ))
+        fig = style_plot(fig, "Observed monthly spread around the 12-month mean", bottom=75)
+        fig.update_xaxes(title="Date")
+        fig.update_yaxes(title="Demand (MW)")
+        fig.update_yaxes(range=[
+            float(min(s.min(), spread["lower"].min())) - 800,
+            float(max(s.max(), spread["upper"].max())) + 800,
+        ])
+        st.plotly_chart(fig, use_container_width=True)
+        st.warning(
+            "**This is NOT a 95% confidence interval.** It is the observed "
+            "12-month rolling mean ±2 sample standard deviations. A ±2 SD "
+            "range describes variation in the data; approximate 95% coverage "
+            "would require distributional assumptions that may not hold here."
+        )
+
+    with tab_mean:
+        boot = cached_block_bootstrap(s, resamples)
+        fig = go.Figure()
+        fig.add_trace(go.Histogram(
+            x=boot["bootstrap_means"], nbinsx=42,
+            name="Moving-block bootstrap means", marker_color="#78a6ff",
+        ))
+        for x, name, color, dash in [
+            (boot["lo"], "2.5th percentile", "#ff8c42", "dash"),
+            (boot["hi"], "97.5th percentile", "#ff8c42", "dash"),
+            (boot["estimate"], "Observed sample mean", "#00d4aa", "solid"),
+        ]:
+            fig.add_vline(x=x, line_color=color, line_dash=dash,
+                          annotation_text=name, annotation_position="top")
+        fig = style_plot(fig, "Uncertainty in the overall historical monthly mean", bottom=80)
+        fig.update_xaxes(title="Estimated mean demand (MW)")
+        fig.update_yaxes(title="Bootstrap frequency")
+        st.plotly_chart(fig, use_container_width=True)
+        a, b, c = st.columns(3)
+        a.metric("Historical mean", f"{boot['estimate']:,.0f} MW")
+        b.metric("95% CI lower", f"{boot['lo']:,.0f} MW")
+        c.metric("95% CI upper", f"{boot['hi']:,.0f} MW")
+        st.caption(
+            f"Circular moving-block bootstrap: {resamples:,} replicates, "
+            f"{boot['block_length']} consecutive months per block, "
+            f"{boot['observations']} complete interior monthly observations."
+        )
+        st.info(
+            "**Interpretation:** This is an approximate 95% confidence interval "
+            "for the *overall historical mean demand*, not a band for monthly "
+            "observations or future predictions. Twelve-month blocks preserve "
+            "some serial dependence, but long-run trend and nonstationarity "
+            "remain important limitations."
+        )
+
+
+# =========================================================
+# EXTENSION 6 — ADDITIVE VS MULTIPLICATIVE DECOMPOSITION
+# =========================================================
+
+def decomposition_panel():
+    st.subheader("6 · Additive versus multiplicative decomposition")
+    st.markdown(
+        """The differenced monthly series exhibits annual repetition, so both
+        models use **12 observations per seasonal cycle**. The same 198 complete
+        interior months are used in both comparisons.
+
+        - **Additive:** observed = trend + seasonal + residual (MW).
+        - **Multiplicative:** observed = trend × seasonal × residual (ratios).
+        """
+    )
+    s = analysis_months(monthly)
+    results = decomposition_comparison(s, period=12)
+    a, m = st.tabs(["Side-by-side decomposition", "Comparable residuals (%)"])
+    with a:
+        from plotly.subplots import make_subplots
+        fig = make_subplots(
+            rows=4, cols=2, shared_xaxes="columns", vertical_spacing=0.065,
+            subplot_titles=[
+                "Additive · observed MW", "Multiplicative · observed MW",
+                "Additive · trend MW", "Multiplicative · trend MW",
+                "Additive · seasonal MW", "Multiplicative · seasonal factor",
+                "Additive · residual MW", "Multiplicative · residual factor",
+            ],
+        )
+        colors = ["#78a6ff", "#ff8c42", "#00d4aa", "#bc97ff"]
+        for col, key in enumerate(["additive", "multiplicative"], start=1):
+            res = results[key]
+            for row, values in enumerate(
+                [res.observed, res.trend, res.seasonal, res.resid], start=1
+            ):
+                fig.add_trace(go.Scatter(
+                    x=values.index, y=values.values,
+                    mode="lines", line=dict(color=colors[row - 1], width=1.8),
+                    showlegend=False,
+                ), row=row, col=col)
+        fig = style_plot(
+            fig, "Same monthly demand, two different seasonal models", bottom=70
+        )
+        fig.update_layout(height=990, hovermode="x")
+        for row in [1, 2, 3, 4]:
+            for col in [1, 2]:
+                fig.update_xaxes(gridcolor="rgba(255,255,255,0.07)",
+                                 row=row, col=col)
+                fig.update_yaxes(gridcolor="rgba(255,255,255,0.07)",
+                                 row=row, col=col)
+        fig.update_yaxes(title_text="MW", row=3, col=1)
+        fig.update_yaxes(title_text="×", row=3, col=2)
+        fig.update_yaxes(title_text="MW", row=4, col=1)
+        fig.update_yaxes(title_text="×", row=4, col=2)
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(
+            "Seasonal and residual scales differ between models: additive is "
+            "measured in MW, multiplicative as ratios. Do not compare their "
+            "raw residual amplitudes directly. Trend edges are extrapolated "
+            "using statsmodels `extrapolate_trend='freq'`."
+        )
+    with m:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=results["add_pct"].index, y=results["add_pct"],
+            mode="lines", name="Additive residual / trend (%)",
+            line=dict(color="#78a6ff", width=1.6),
+        ))
+        fig.add_trace(go.Scatter(
+            x=results["mult_pct"].index, y=results["mult_pct"],
+            mode="lines", name="(Multiplicative residual − 1) × 100 (%)",
+            line=dict(color="#ff8c42", width=1.6),
+        ))
+        fig.add_hline(y=0, line_color="#cbd5e1", line_dash="dash")
+        fig = style_plot(
+            fig, "Residuals expressed in comparable percent-of-level units",
+            bottom=80,
+        )
+        fig.update_xaxes(title="Date")
+        fig.update_yaxes(title="Approximate residual (% of trend / ratio)")
+        st.plotly_chart(fig, use_container_width=True)
+        st.info(
+            "**Interpretation:** Look for remaining annual repetition, changes "
+            "in residual spread as demand level changes, and sustained runs "
+            "above or below zero. The residuals are placed on a comparable "
+            "percentage scale for visual inspection; neither model is "
+            "declared universally better by this chart."
+        )
+
+
+# =========================================================
+# EXTENSION 7 — ALTAIR INTERACTIVE DATE-RANGE BRUSH
+# =========================================================
+
+def altair_brush_panel():
+    st.subheader("7 · Interactive date-range brush")
+    st.markdown(
+        """Drag across the **bottom overview chart** to select a period.
+        The detail chart above updates in your browser without changing the
+        source data. Drag the selection handles to refine it; double-click
+        or click outside to clear the range."""
+    )
+    # Date-indexed, sorted, complete monthly data; all resolution files
+    # are available to the selection. Daily data can exceed Altair's 5k
+    # default inline row limit, so disable the limit *for this view*.
+    alt.data_transformers.disable_max_rows()
+    s = series.dropna().sort_index()
+    df = s.rename("demand_mw").reset_index()
+    df.columns = ["date", "demand_mw"]
+    df["rolling_mw"] = s.rolling(window, min_periods=window).mean().values
+    long = df.melt(
+        id_vars=["date"], value_vars=["demand_mw", "rolling_mw"],
+        var_name="series", value_name="mw",
+    ).dropna()
+    long["series"] = long["series"].map({
+        "demand_mw": f"{resolution} average demand",
+        "rolling_mw": f"{window}-period rolling mean",
+    })
+    brush = alt.selection_interval(encodings=["x"], name="date_range")
+    palette = alt.Scale(
+        domain=[f"{resolution} average demand", f"{window}-period rolling mean"],
+        range=["#78a6ff", "#ff8c42"],
+    )
+    detail = (
+        alt.Chart(long)
+        .mark_line(strokeWidth=2)
+        .encode(
+            x=alt.X("date:T", title="Selected date range"),
+            y=alt.Y("mw:Q", title="Average electricity demand (MW)",
+                    scale=alt.Scale(zero=False)),
+            color=alt.Color("series:N", scale=palette, title="Series"),
+            tooltip=[
+                alt.Tooltip("date:T", title="Date"),
+                alt.Tooltip("mw:Q", title="Demand (MW)", format=",.0f"),
+                alt.Tooltip("series:N", title="Series"),
+            ],
+        )
+        .transform_filter(brush)
+        .properties(height=390, title="Detail · drag on the overview to filter")
+    )
+    overview = (
+        alt.Chart(df)
+        .mark_area(color="#78a6ff", opacity=0.35)
+        .encode(
+            x=alt.X("date:T", title="Drag to select dates"),
+            y=alt.Y("demand_mw:Q", title="MW", scale=alt.Scale(zero=False)),
+        )
+        .add_params(brush)
+        .properties(height=105, title="Overview · date-range brush")
+    )
+    chart = alt.vconcat(detail, overview, spacing=22).resolve_scale(
+        x="independent", y="independent"
+    ).configure(background="#17191f").configure_view(
+        stroke=None
+    ).configure_axis(
+        labelColor="#e8ecf1", titleColor="#e8ecf1", gridColor="#333b49"
+    ).configure_title(color="#f5f7fb").configure_legend(
+        labelColor="#e8ecf1", titleColor="#e8ecf1"
+    )
+    st.altair_chart(chart, use_container_width=True, theme=None)
+    st.caption(
+        f"Viewing {len(s):,} {resolution.lower()} observations; "
+        f"{window}-period rolling mean. The brush filters the displayed "
+        "detail only; it does not recompute the full-series rolling mean."
+    )
+    st.info(
+        "**Temporal-honesty note:** Both charts label their units and "
+        "resolution. The y-axis is permitted to start above zero because "
+        "these are line/area temporal comparisons, and the selected time "
+        "range is explicitly shown in the overview. Read changes in "
+        "magnitude from the labeled MW axis, not simply their visual slope."
+    )
+
+
+# =========================================================
 # RENDER
 # =========================================================
 
@@ -988,8 +1318,17 @@ elif mode == "3 · Progressive time-series reveal":
         use_container_width=True,
     )
 
-else:
+elif mode == "4 · Manual Streamlit-loop demo":
     manual_loop_demo()
+
+elif mode == "5 · Uncertainty & bootstrap confidence intervals":
+    uncertainty_panel()
+
+elif mode == "6 · Additive vs multiplicative decomposition":
+    decomposition_panel()
+
+else:
+    altair_brush_panel()
 
 
 
@@ -1000,39 +1339,26 @@ else:
 st.markdown("---")
 st.subheader("What to notice")
 
-if resolution == "Monthly":
-    if window < 12:
-        st.info(
-            f"""
-**{window}-month window:** this is shorter than the 12-month annual cycle.
-It smooths some short-term variation, but much of the recurring seasonal
-pattern remains visible.
-"""
-        )
-    elif window == 12:
-        st.success(
-            """
-**12-month window:** this spans one complete annual cycle.
-Seasonal highs and lows largely average out, making the underlying
-long-run demand trend easier to see.
-"""
-        )
+if mode == "1 · Smooth rolling-window motion" or mode == "4 · Manual Streamlit-loop demo":
+    if resolution == "Monthly":
+        if window < 12:
+            st.info(f"**{window}-month window:** retains much of the annual seasonal variation.")
+        elif window == 12:
+            st.success("**12-month window:** averages over a full annual cycle, revealing slower movement.")
+        else:
+            st.warning(f"**{window}-month window:** smooths seasonal and shorter-term movements; turning points may be suppressed.")
     else:
-        st.warning(
-            f"""
-**{window}-month window:** this is longer than one annual cycle.
-The line becomes smoother, but some meaningful shorter-term changes
-and turning points may also be suppressed.
-"""
-        )
+        st.info(f"**{resolution} view:** {window}-period smoothing changes the amount of short-term variation shown.")
+elif mode == "2 · Seasonal pattern by year":
+    st.info("**Seasonal comparison:** each frame represents one complete calendar year (2003–2017); compare the shape and amplitude of summer and winter demand.")
+elif mode == "3 · Progressive time-series reveal":
+    st.info("**Progressive reveal:** the monthly series and its 12-month rolling mean accumulate through time; the gray reference line shows the full record.")
+elif mode == "5 · Uncertainty & bootstrap confidence intervals":
+    st.info("**Which uncertainty?** The year-bootstrap CI estimates seasonal averages, the ±2 SD band describes variation, and the moving-block CI estimates the overall historical mean.")
+elif mode == "6 · Additive vs multiplicative decomposition":
+    st.info("**Decomposition:** annual trend and seasonal structures are modeled on the same complete monthly sample. Inspect comparable percent residuals before interpreting fit.")
 else:
-    st.info(
-        f"""
-At **{resolution.lower()}** resolution, the active rolling window is
-**{window} periods**. Changing temporal resolution and window length changes
-how much short-term variability is retained versus smoothed away.
-"""
-    )
+    st.info("**Date brush:** the selected temporal range changes the displayed detail; it does not alter the original observations or the precomputed rolling mean.")
 
 
 # =========================================================
@@ -1047,6 +1373,8 @@ The selected resolution is **{resolution}** and is displayed explicitly because
 temporal aggregation changes the apparent story. Fixed y-axis limits are used
 within each animation, preventing automatic rescaling from exaggerating motion.
 The rolling-window length is also disclosed because smoothing changes what the
-viewer sees.
+viewer sees. Monthly statistical analysis excludes incomplete boundary months.
+The uncertainty ribbons are labeled separately as descriptive spread or
+confidence intervals; no chart is presented as a prediction of future demand.
 """
 )
