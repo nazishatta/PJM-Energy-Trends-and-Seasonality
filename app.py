@@ -82,7 +82,7 @@ st.markdown(
 
 st.title("⚡ PJM Energy Trends & Seasonality")
 st.caption(
-    "Smooth Plotly-native animation for Week 4 time-series analysis."
+    "Smooth Plotly-native animation."
 )
 
 
@@ -93,7 +93,7 @@ st.caption(
 c1, c2, c3, c4 = st.columns(4)
 
 c1.metric("Region", "PJM East")
-c2.metric("Measure", "Electricity demand")
+c2.metric("Measure", "Demand")
 c3.metric("Unit", "MW")
 c4.metric("Coverage", "2002–2018")
 
